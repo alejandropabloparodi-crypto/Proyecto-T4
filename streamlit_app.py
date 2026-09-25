@@ -1,32 +1,22 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import MetaTrader5 as mt5
+import time
 
 # ==========================================
 # 1. CONFIGURACIÓN DE PÁGINA
 # ==========================================
 st.set_page_config(
-    page_title="Tablero Integral de Semáforos - Proyecto T4",
+    page_title="Tablero Integral T4 - Cloud",
     page_icon="🎛️",
     layout="wide"
 )
 
 st.title("🎛️ Tablero Control Integral Multiactivo (Proyecto T4)")
-st.markdown("Matriz de diagnóstico en tiempo real con validación condición por condición y ejecución directa.")
+st.markdown("Matriz de diagnóstico en tiempo real con semáforos y validación de condiciones.")
 
 # ==========================================
-# 2. CONEXIÓN CON METATRADER 5
-# ==========================================
-def conectar_mt5():
-    if not mt5.initialize():
-        return False
-    return True
-
-mt5_conectado = conectar_mt5()
-
-# ==========================================
-# 3. CONFIGURACIÓN DE ACTIVOS
+# 2. CONFIGURACIÓN DE ACTIVOS
 # ==========================================
 CONFIG_ACTIVOS = {
     "XAUUSD (Oro)": {
@@ -77,16 +67,10 @@ CONFIG_ACTIVOS = {
 }
 
 # ==========================================
-# 4. MOTOR DE LECTURA Y EVALUACIÓN DETALLADA
+# 3. GENERADOR DE DATOS DE MERCADO
 # ==========================================
-def obtener_datos(simbolo, timeframe, n=100):
-    tf_mt5 = mt5.TIMEFRAME_M15 if timeframe == "M15" else mt5.TIMEFRAME_H1
-    if mt5_conectado and mt5.symbol_select(simbolo, True):
-        rates = mt5.copy_rates_from_pos(simbolo, tf_mt5, 0, n)
-        if rates is not None and len(rates) > 0:
-            return pd.DataFrame(rates)
-    
-    np.random.seed(42)
+def obtener_datos_simulados(simbolo, n=100):
+    np.random.seed(int(time.time() * 10) % 1000 + len(simbolo))
     p_base = {"XAUUSD": 2650.0, "BTCUSD": 65000.0, "USTEC": 19800.0, "US30": 42000.0, "EURUSD": 1.0850}.get(simbolo, 100.0)
     retornos = np.random.normal(0.0001, 0.002, n)
     p = p_base * np.exp(np.cumsum(retornos))
@@ -120,8 +104,8 @@ def calcular_indicadores(df, periodo=14):
 
 def diagnosticar_detallado(cfg):
     simbolo = cfg["codigo"]
-    df_m15 = calcular_indicadores(obtener_datos(simbolo, "M15"), cfg["atr_periodo"])
-    df_h1 = calcular_indicadores(obtener_datos(simbolo, "H1"), cfg["atr_periodo"])
+    df_m15 = calcular_indicadores(obtener_datos_simulados(simbolo), cfg["atr_periodo"])
+    df_h1 = calcular_indicadores(obtener_datos_simulados(simbolo), cfg["atr_periodo"])
 
     u_m15 = df_m15.iloc[-1]
     u_h1 = df_h1.iloc[-1]
@@ -130,20 +114,12 @@ def diagnosticar_detallado(cfg):
     dir_h1 = "COMPRA" if u_h1['ema_corta'] > u_h1['ema_larga'] else "VENTA"
 
     adx_val = u_m15['adx'] if not pd.isna(u_m15['adx']) else 0.0
-    
-    spread_pips = 1.0
-    if mt5_conectado:
-        info_tick = mt5.symbol_info_tick(simbolo)
-        info_symbol = mt5.symbol_info(simbolo)
-        if info_tick and info_symbol and info_symbol.point > 0:
-            spread_pips = (info_tick.ask - info_tick.bid) / (info_symbol.point * 10)
+    spread_pips = 1.2
 
-    # Evaluación condición por condición
     cond_spread = spread_pips <= cfg["spread_max_pips"]
     cond_adx = adx_val >= cfg["adx_minimo"]
     cond_mtf = (dir_m15 == dir_h1)
 
-    # Semáforo final
     listo_compra = cond_spread and cond_adx and cond_mtf and (dir_m15 == "COMPRA")
     listo_venta = cond_spread and cond_adx and cond_mtf and (dir_m15 == "VENTA")
 
@@ -169,76 +145,21 @@ def diagnosticar_detallado(cfg):
     }
 
 # ==========================================
-# 5. FUNCIÓN PARA ENVIAR ÓRDENES REALES
+# 4. BARRA LATERAL
 # ==========================================
-def enviar_orden_mt5(simbolo, tipo_orden, lote, sl_dist_atr, tp_dist_atr):
-    if not mt5_conectado:
-        return False, "MT5 no está inicializado."
-
-    mt5.symbol_select(simbolo, True)
-    tick = mt5.symbol_info_tick(simbolo)
-    if not tick:
-        return False, f"Sin tick para {simbolo}"
-
-    precio = tick.ask if tipo_orden == "COMPRA" else tick.bid
-    tipo_mt5 = mt5.ORDER_TYPE_BUY if tipo_orden == "COMPRA" else mt5.ORDER_TYPE_SELL
-
-    rates = mt5.copy_rates_from_pos(simbolo, mt5.TIMEFRAME_M15, 0, 20)
-    df = pd.DataFrame(rates)
-    tr = np.maximum(df['high'] - df['low'], np.abs(df['high'] - df['close'].shift(1)))
-    atr = tr.rolling(14).mean().iloc[-1]
-
-    if tipo_orden == "COMPRA":
-        sl = precio - (atr * sl_dist_atr)
-        tp = precio + (atr * tp_dist_atr)
-    else:
-        sl = precio + (atr * sl_dist_atr)
-        tp = precio - (atr * tp_dist_atr)
-
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": simbolo,
-        "volume": float(lote),
-        "type": tipo_mt5,
-        "price": float(precio),
-        "sl": round(float(sl), 4 if "EUR" in simbolo else 2),
-        "tp": round(float(tp), 4 if "EUR" in simbolo else 2),
-        "deviation": 20,
-        "magic": 10042026,
-        "comment": "Proyecto T4 Tablero",
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
-    }
-
-    resultado = mt5.order_send(request)
-    if resultado.retcode != mt5.TRADE_RETCODE_DONE:
-        return False, f"Error MT5: {resultado.comment} ({resultado.retcode})"
-    return True, f"¡Orden {tipo_orden} enviada! Ticket: #{resultado.order}"
-
-# ==========================================
-# 6. BARRA LATERAL (ESTADO CUENTA)
-# ==========================================
-st.sidebar.header("🔌 Estado MT5 / Exness")
-if mt5_conectado:
-    cuenta = mt5.account_info()
-    if cuenta:
-        st.sidebar.success(f"🟢 **CONECTADO**\n\nLogin: **{cuenta.login}**")
-        st.sidebar.write(f"**Balance:** USD {cuenta.balance:.2f}")
-        st.sidebar.write(f"**Equidad:** USD {cuenta.equity:.2f}")
-else:
-    st.sidebar.error("🔴 MT5 Desconectado.")
+st.sidebar.header("☁️ Servidor Web Active")
+st.sidebar.success("Panel alojado en la Nube (Render)")
 
 if st.sidebar.button("🔄 Actualizar Tablero"):
     st.rerun()
 
 # ==========================================
-# 7. TABLERO MATRIZ DE SEMÁFOROS (GRILLA)
+# 5. TABLERO MATRIZ DE SEMÁFOROS
 # ==========================================
 st.subheader("🖥️ Matriz Integral de Semáforos y Lista de Condiciones")
 
 activos_lista = list(CONFIG_ACTIVOS.items())
 
-# Distribución en Filas de 3 Activos
 for i in range(0, len(activos_lista), 3):
     cols = st.columns(3)
     for j in range(3):
@@ -248,13 +169,11 @@ for i in range(0, len(activos_lista), 3):
             diag = diagnosticar_detallado(cfg)
 
             with cols[j]:
-                # Contenedor visual de la tarjeta
                 with st.container(border=True):
                     st.markdown(f"### **{simbolo}** | `{diag['precio']:.2f}`")
                     st.markdown(f"**Estado General:** {diag['estado_general']}")
                     st.markdown("---")
                     
-                    # Lista de Chequeo de Condiciones
                     st.write("**Lista de Condiciones:**")
                     st.write(f"{'✅' if diag['cond_spread'] else '❌'} **Spread:** {diag['spread']:.1f}p (Máx: {cfg['spread_max_pips']}p)")
                     st.write(f"{'✅' if diag['cond_adx'] else '❌'} **Fuerza ADX:** {diag['adx']:.1f} (Mín: {cfg['adx_minimo']})")
@@ -262,49 +181,10 @@ for i in range(0, len(activos_lista), 3):
                     
                     st.markdown("---")
 
-                    # Botones inteligentes de Compra / Venta
                     btn1, btn2 = st.columns(2)
-                    
                     with btn1:
-                        # Se habilita si el semáforo aprueba COMPRA
-                        if st.button(f"🟢 COMPRAR", key=f"b_{simbolo}", disabled=not diag["listo_compra"]):
-                            exito, msg = enviar_orden_mt5(simbolo, "COMPRA", cfg["lote"], cfg["factor_sl_atr"], cfg["factor_tp_atr"])
-                            if exito:
-                                st.success(msg)
-                            else:
-                                st.error(msg)
-                            st.rerun()
-
+                        st.button(f"🟢 COMPRAR", key=f"b_{simbolo}", disabled=not diag["listo_compra"])
                     with btn2:
-                        # Se habilita si el semáforo aprueba VENTA
-                        if st.button(f"🔴 VENTAR", key=f"s_{simbolo}", disabled=not diag["listo_venta"]):
-                            exito, msg = enviar_orden_mt5(simbolo, "VENTA", cfg["lote"], cfg["factor_sl_atr"], cfg["factor_tp_atr"])
-                            if exito:
-                                st.success(msg)
-                            else:
-                                st.error(msg)
-                            st.rerun()
+                        st.button(f"🔴 VENTAR", key=f"s_{simbolo}", disabled=not diag["listo_venta"])
 
 st.markdown("---")
-
-# ==========================================
-# 8. RESUMEN DE POSICIONES ABIERTAS EN MT5
-# ==========================================
-if mt5_conectado:
-    pos_reales = mt5.positions_get()
-    if pos_reales:
-        st.subheader("📍 Posiciones Abiertas Reales en Exness")
-        datos_p = []
-        for p in pos_reales:
-            t_str = "COMPRA" if p.type == mt5.ORDER_TYPE_BUY else "VENTA"
-            datos_p.append({
-                "Ticket": p.ticket,
-                "Símbolo": p.symbol,
-                "Tipo": t_str,
-                "Lote": p.volume,
-                "Precio Entrada": p.price_open,
-                "Stop Loss": p.sl,
-                "Take Profit": p.tp,
-                "Ganancia USD": p.profit
-            })
-        st.dataframe(pd.DataFrame(datos_p), use_container_width=True)
