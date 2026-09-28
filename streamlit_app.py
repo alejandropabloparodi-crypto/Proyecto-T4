@@ -7,16 +7,16 @@ import time
 # 1. CONFIGURACIÓN DE PÁGINA
 # ==========================================
 st.set_page_config(
-    page_title="Tablero Integral T4 - Cloud",
+    page_title="Tablero Control T4 - Escalera & Multiactivo",
     page_icon="🎛️",
     layout="wide"
 )
 
 st.title("🎛️ Tablero Control Integral Multiactivo (Proyecto T4)")
-st.markdown("Matriz de diagnóstico en tiempo real con semáforos y validación de condiciones.")
+st.markdown("Matriz de diagnóstico en tiempo real con semáforos, calculadora de riesgo y parámetros de **Escalera ATR**.")
 
 # ==========================================
-# 2. CONFIGURACIÓN DE ACTIVOS
+# 2. CONFIGURACIÓN DE ACTIVOS Y ESCALERA
 # ==========================================
 CONFIG_ACTIVOS = {
     "XAUUSD (Oro)": {
@@ -24,8 +24,9 @@ CONFIG_ACTIVOS = {
         "atr_periodo": 14,
         "adx_minimo": 25.0,
         "spread_max_pips": 3.0,
-        "factor_sl_atr": 1.5,
-        "factor_tp_atr": 3.0,
+        "factor_sl_inicial": 1.5,
+        "factor_break_even": 1.0,
+        "factor_paso_escalera": 1.0,
         "lote": 0.01
     },
     "BTCUSD (Bitcoin)": {
@@ -33,45 +34,36 @@ CONFIG_ACTIVOS = {
         "atr_periodo": 14,
         "adx_minimo": 28.0,
         "spread_max_pips": 15.0,
-        "factor_sl_atr": 2.0,
-        "factor_tp_atr": 4.0,
+        "factor_sl_inicial": 2.0,
+        "factor_break_even": 1.2,
+        "factor_paso_escalera": 1.2,
         "lote": 0.01
     },
-    "USTEC (Nasdaq)": {
-        "codigo": "USTEC",
+    "USOIL (Petróleo WTI)": {
+        "codigo": "USOIL",
         "atr_periodo": 14,
-        "adx_minimo": 22.0,
-        "spread_max_pips": 2.5,
-        "factor_sl_atr": 1.2,
-        "factor_tp_atr": 2.5,
-        "lote": 0.1
-    },
-    "US30 (Dow Jones)": {
-        "codigo": "US30",
-        "atr_periodo": 14,
-        "adx_minimo": 22.0,
-        "spread_max_pips": 3.0,
-        "factor_sl_atr": 1.2,
-        "factor_tp_atr": 2.5,
-        "lote": 0.1
-    },
-    "EURUSD (Euro/Dólar)": {
-        "codigo": "EURUSD",
-        "atr_periodo": 14,
-        "adx_minimo": 20.0,
-        "spread_max_pips": 1.2,
-        "factor_sl_atr": 1.0,
-        "factor_tp_atr": 2.0,
-        "lote": 0.1
+        "adx_minimo": 24.0,
+        "spread_max_pips": 4.0,
+        "factor_sl_inicial": 1.5,
+        "factor_break_even": 1.0,
+        "factor_paso_escalera": 1.0,
+        "lote": 0.01
     }
 }
 
 # ==========================================
-# 3. GENERADOR DE DATOS DE MERCADO
+# 3. GENERADOR DE DATOS Y CÁLCULOS TÉCNICOS
 # ==========================================
 def obtener_datos_simulados(simbolo, n=100):
     np.random.seed(int(time.time() * 10) % 1000 + len(simbolo))
-    p_base = {"XAUUSD": 2650.0, "BTCUSD": 65000.0, "USTEC": 19800.0, "US30": 42000.0, "EURUSD": 1.0850}.get(simbolo, 100.0)
+    
+    # Precios base de referencia para el entorno visual web
+    p_base = {
+        "XAUUSD": 2680.0,   # Oro
+        "BTCUSD": 65000.0,  # Bitcoin
+        "USOIL": 72.50      # Petróleo WTI
+    }.get(simbolo, 100.0)
+
     retornos = np.random.normal(0.0001, 0.002, n)
     p = p_base * np.exp(np.cumsum(retornos))
     return pd.DataFrame({
@@ -82,11 +74,13 @@ def obtener_datos_simulados(simbolo, n=100):
 
 def calcular_indicadores(df, periodo=14):
     df_c = df.copy()
+    # ATR
     tr1 = df_c['high'] - df_c['low']
     tr2 = (df_c['high'] - df_c['close'].shift(1)).abs()
     tr3 = (df_c['low'] - df_c['close'].shift(1)).abs()
     df_c['atr'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).rolling(periodo).mean()
 
+    # ADX
     df_c['up_move'] = df_c['high'] - df_c['high'].shift(1)
     df_c['down_move'] = df_c['low'].shift(1) - df_c['low']
     df_c['plus_dm'] = np.where((df_c['up_move'] > df_c['down_move']) & (df_c['up_move'] > 0), df_c['up_move'], 0.0)
@@ -98,6 +92,7 @@ def calcular_indicadores(df, periodo=14):
     dx = (np.abs(plus_di - minus_di) / sum_di) * 100
     df_c['adx'] = pd.Series(dx).rolling(periodo).mean()
 
+    # EMAs
     df_c['ema_corta'] = df_c['close'].ewm(span=9, adjust=False).mean()
     df_c['ema_larga'] = df_c['close'].ewm(span=21, adjust=False).mean()
     return df_c
@@ -114,6 +109,7 @@ def diagnosticar_detallado(cfg):
     dir_h1 = "COMPRA" if u_h1['ema_corta'] > u_h1['ema_larga'] else "VENTA"
 
     adx_val = u_m15['adx'] if not pd.isna(u_m15['adx']) else 0.0
+    atr_val = u_m15['atr'] if not pd.isna(u_m15['atr']) else 1.0
     spread_pips = 1.2
 
     cond_spread = spread_pips <= cfg["spread_max_pips"]
@@ -130,10 +126,16 @@ def diagnosticar_detallado(cfg):
     else:
         estado_general = "🔴 NO APTO / EN ESPERA"
 
+    # Distancias en dólares calculadas con ATR
+    sl_dist_USD = atr_val * cfg["factor_sl_inicial"]
+    be_dist_USD = atr_val * cfg["factor_break_even"]
+    paso_dist_USD = atr_val * cfg["factor_paso_escalera"]
+
     return {
         "precio": u_m15['close'],
         "spread": spread_pips,
         "adx": adx_val,
+        "atr": atr_val,
         "dir_m15": dir_m15,
         "dir_h1": dir_h1,
         "cond_spread": cond_spread,
@@ -141,11 +143,14 @@ def diagnosticar_detallado(cfg):
         "cond_mtf": cond_mtf,
         "listo_compra": listo_compra,
         "listo_venta": listo_venta,
-        "estado_general": estado_general
+        "estado_general": estado_general,
+        "sl_dist_USD": sl_dist_USD,
+        "be_dist_USD": be_dist_USD,
+        "paso_dist_USD": paso_dist_USD
     }
 
 # ==========================================
-# 4. BARRA LATERAL
+# 4. BARRA LATERAL (CONTROLES)
 # ==========================================
 st.sidebar.header("☁️ Servidor Web Active")
 st.sidebar.success("Panel alojado en la Nube (Render)")
@@ -153,10 +158,17 @@ st.sidebar.success("Panel alojado en la Nube (Render)")
 if st.sidebar.button("🔄 Actualizar Tablero"):
     st.rerun()
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("🧮 Calculadora de Gestión de Riesgo")
+capital_cuenta = st.sidebar.number_input("Capital Cuenta ($USD):", value=1000.0, step=100.0)
+riesgo_pct = st.sidebar.slider("Riesgo por operación (%):", 0.5, 3.0, 1.0)
+riesgo_USD = capital_cuenta * (riesgo_pct / 100.0)
+st.sidebar.info(f"Riesgo Máximo Permitido: **${riesgo_USD:.2f} USD**")
+
 # ==========================================
-# 5. TABLERO MATRIZ DE SEMÁFOROS
+# 5. TABLERO MATRIZ DE SEMÁFOROS Y ESCALERA
 # ==========================================
-st.subheader("🖥️ Matriz Integral de Semáforos y Lista de Condiciones")
+st.subheader("🖥️ Matriz Integral de Semáforos & Parámetros de Escalera")
 
 activos_lista = list(CONFIG_ACTIVOS.items())
 
@@ -170,15 +182,21 @@ for i in range(0, len(activos_lista), 3):
 
             with cols[j]:
                 with st.container(border=True):
-                    st.markdown(f"### **{simbolo}** | `{diag['precio']:.2f}`")
+                    st.markdown(f"### **{simbolo}** | `${diag['precio']:.2f}`")
                     st.markdown(f"**Estado General:** {diag['estado_general']}")
                     st.markdown("---")
                     
-                    st.write("**Lista de Condiciones:**")
+                    st.write("**Filtros de Entrada:**")
                     st.write(f"{'✅' if diag['cond_spread'] else '❌'} **Spread:** {diag['spread']:.1f}p (Máx: {cfg['spread_max_pips']}p)")
                     st.write(f"{'✅' if diag['cond_adx'] else '❌'} **Fuerza ADX:** {diag['adx']:.1f} (Mín: {cfg['adx_minimo']})")
                     st.write(f"{'✅' if diag['cond_mtf'] else '❌'} **Alineación MTF:** M15 ({diag['dir_m15']}) / H1 ({diag['dir_h1']})")
                     
+                    st.markdown("---")
+                    st.write("**🧱 Configuración Escalera ATR:**")
+                    st.write(f"• **Stop Loss Inicial:** -${diag['sl_dist_USD']:.2f} USD")
+                    st.write(f"• **Activación Break-Even:** +${diag['be_dist_USD']:.2f} USD")
+                    st.write(f"• **Ancho del Escalón:** +${diag['paso_dist_USD']:.2f} USD")
+
                     st.markdown("---")
 
                     btn1, btn2 = st.columns(2)
